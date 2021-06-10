@@ -1,0 +1,24 @@
+repos:
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v2.3.0
+  hooks:
+  - id: trailing-whitespace
+    exclude: ^.*/scripts/.*\.txt$
+  - id: end-of-file-fixer
+    exclude: ^.*/scripts/.*\.txt$
+
+- repo: https://github.com/antonbabenko/pre-commit-terraform
+  rev: v1.29.0
+  hooks:
+  - id: terraform_fmt
+  - id: terraform_tflint
+    args: ['args=--module']
+
+- repo: local
+  hooks:
+  - id: tkfmt
+    name: tk fmt (jsonnetfmt)
+    language: system
+    entry: tk fmt
+    pass_filenames: true
+    types: [ "jsonnet" ]
