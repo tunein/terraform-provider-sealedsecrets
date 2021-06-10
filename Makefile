@@ -48,27 +48,42 @@ test: $(GOTESTSUM_BIN)
 cover:
 	go test -race -covermode atomic -coverprofile coverage.out ./...
 
+.PHONY: build
 install: build
 	mkdir -p $$HOME/.terraform.d/plugins/tunein.com/tunein-incubator/sealedsecrets/0.0.1/darwin_amd64/
 	cp ./dist/terraform-provider-sealedsecrets_v0.0.1 $$HOME/.terraform.d/plugins/tunein.com/tunein-incubator/sealedsecrets/0.0.1/darwin_amd64/
 
+.PHONY: uninstall
 uninstall:
 	rm $$HOME/.terraform.d/plugins/terraform-provider-sealedsecrets
 
+.PHONY: example
 # example: export TF_LOG = TRACE
 example: install
 	terraform init
 	terraform apply -parallelism=1
-	terraform output manifest
+	terraform output
+
+.PHONY: example.clean
+example.clean:
+	rm terraform.tfstate*
+
+.PHONY: example.changed
+example.changed: export TF_VAR_data = {foo = "new"}
+example.changed: example
+
 
 # PRE-COMMIT & GITHOOKS
 # ---------------------
+.PHONY: pre-commit.install
 pre-commit.install:
 	pre-commit install --install-hooks
 
+.PHONY: pre-commit.run
 pre-commit.run:
 	pre-commit run --all-files
 
+.PHONY: release
 release: clean
 	@echo "--skip-publish, as we will use github actions to do this"
 	git-chglog -o CHANGELOG.md

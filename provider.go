@@ -3,15 +3,16 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/tunein/terraform-provider-sealedsecrets/util/sh"
-	"os"
 )
 
 type ProviderConfig struct {
-	kubectl string
-	kubeseal string
+	kubectl     string
+	kubeseal    string
 	kubecontext string
 }
 
@@ -19,21 +20,25 @@ func Provider() *schema.Provider {
 	return &schema.Provider{
 		Schema: map[string]*schema.Schema{
 			"kubeseal": {
-				Type:        schema.TypeString,
-				Optional:    true,
-				Default:     sh.Which("kubeseal"),
+				Type:     schema.TypeString,
+				Optional: true,
+				DefaultFunc: func() (interface{}, error) {
+					return sh.Which("kubeseal"), nil
+				},
 			},
 			"kubectl": {
-				Type: schema.TypeString,
+				Type:     schema.TypeString,
 				Optional: true,
-				Default: sh.Which("kubectl"),
+				DefaultFunc: func() (interface{}, error) {
+					return sh.Which("kubectl"), nil
+				},
 			},
 			"server_address": {
-				Type:        schema.TypeString,
-				Required:    true,
+				Type:     schema.TypeString,
+				Required: true,
 			},
 		},
-		DataSourcesMap: map[string]*schema.Resource{
+		ResourcesMap: map[string]*schema.Resource{
 			"sealedsecrets_sealed_secret": resourceSealedSecret(),
 		},
 		ConfigureContextFunc: providerConfigure,
@@ -67,22 +72,21 @@ func providerConfigure(ctx context.Context, d *schema.ResourceData) (interface{}
 		return nil, diags
 	}
 
-
 	kClient := KubeClient{kubectl_bin: kubectl}
 	config, err := kClient.findContext(ctx, d.Get("server_address").(string))
 	if err != nil {
 		diags = append(diags, diag.Diagnostic{
 			Severity: diag.Error,
-			Summary: err.Error(),
+			Summary:  err.Error(),
 		})
 
 		return nil, diags
 	}
 
 	return &ProviderConfig{
-		kubeseal:     kubeseal,
-		kubectl:      kubectl,
-		kubecontext:  config.Context.Name,
+		kubeseal:    kubeseal,
+		kubectl:     kubectl,
+		kubecontext: config.Context.Name,
 	}, nil
 }
 

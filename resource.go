@@ -4,224 +4,266 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/tunein/terraform-provider-sealedsecrets/util/sh"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"strconv"
+	"log"
 	"strings"
-	"time"
+)
+
+const (
+	ATTR_NAME = "name"
+	ATTR_NAMESPACE = "namespace"
+	ATTR_SCOPE = "scope"
+	ATTR_TYPE = "type"
+	ATTR_LABELS = "labels"
+	ATTR_ANNOTATIONS = "annotations"
+	ATTR_DATA = "data"
+	ATTR_SHA256 = "sha256"
+	ATTR_MANIFEST = "manifest"
 )
 
 func resourceSealedSecret() *schema.Resource {
 	return &schema.Resource{
+		CreateContext: resourceSealedSecretCreate,
 		ReadContext:   resourceSealedSecretRead,
+		DeleteContext: resourceSealedSecretDelete,
 		Schema: map[string]*schema.Schema{
-			"name": {
+			ATTR_NAME: {
 				Type:        schema.TypeString,
 				Required:    true,
+				ForceNew: true,
 			},
-			"namespace": {
+			ATTR_NAMESPACE: {
 				Type:        schema.TypeString,
 				Optional:    true,
+				ForceNew: true,
 			},
-			"scope": {
+			ATTR_SCOPE: {
 				Type: schema.TypeString,
 				Required: true,
+				ForceNew: true,
 			},
-			"type": {
+			ATTR_TYPE: {
 				Type:        schema.TypeString,
 				Optional:    true,
 				Default:     "Opaque",
+				ForceNew: true,
 			},
-			"labels": {
+			ATTR_LABELS: {
 				Type: schema.TypeMap,
 				Elem: &schema.Schema{
 					Type: schema.TypeString,
 				},
 				Optional: true,
+				ForceNew: true,
 			},
-			"annotations": {
+			ATTR_ANNOTATIONS: {
 				Type: schema.TypeMap,
 				Elem: &schema.Schema{
 					Type: schema.TypeString,
 				},
 				Optional: true,
+				ForceNew: true,
 			},
-			"data": {
+			ATTR_DATA: {
 				Type:        schema.TypeMap,
 				Elem: &schema.Schema{
 					Type: schema.TypeString,
 				},
-				Required:    true,
-				Sensitive: true,
+				Required: true,
+				ForceNew: true,
+				Sensitive:   true,
 			},
-			"sha256": {
+			ATTR_SHA256: {
 				Type: schema.TypeString,
 				Computed: true,
 			},
-			"manifest": {
+			ATTR_MANIFEST: {
 				Type: schema.TypeString,
 				Computed: true,
 			},
-		},
-		Timeouts: &schema.ResourceTimeout{
-			Read:    schema.DefaultTimeout(1 * time.Minute),
 		},
 	}
 }
 
-func resourceSealedSecretRead(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
+func resourceSealedSecretCreate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
+	log.Println("SEALEDSECRET CREATE CALLED")
+	secretJsonBytes, err := generateSecret(d)
+
 	providerConfig := m.(*ProviderConfig)
 
-	var diags diag.Diagnostics
+	if err != nil {
+		return diag.FromErr(err)
+	}
 
-	//var oldDataSha256 string
-	//{
-	//	if attr, ok := d.GetOk("sha256"); ok {
-	//		oldDataSha256 = attr.(string)
-	//	}
+	manifest, err := sealIt(
+		ctx,
+		secretJsonBytes,
+		d.Get(ATTR_SCOPE).(string),
+		d.Get(ATTR_NAMESPACE).(string),
+		providerConfig.kubeseal,
+		providerConfig.kubecontext,
+	)
+
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	if err := d.Set(ATTR_MANIFEST, manifest); err != nil {
+		return diag.FromErr(err)
+	}
+
+	// set this to empty to ensure it's not persisted in state
+	//if err := d.Set(ATTR_DATA, make(map[string]interface{})); err != nil {
+	//	return diag.FromErr(err)
 	//}
 
-	data := make(map[string]string)
-	{
-		if attr, ok := d.GetOk("data"); ok {
-			for key, val := range attr.(map[string]interface{}) {
-				data[key] = val.(string)
-			}
-		}
-	}
+	return resourceSealedSecretRead(ctx, d, m)
+}
 
-	dataBytes, err := json.Marshal(data)
+func resourceSealedSecretRead(_ context.Context, d *schema.ResourceData, _ interface{}) diag.Diagnostics {
+	log.Println("SEALEDSECRET READ CALLED")
+	var diags diag.Diagnostics
+
+	dataOld, dataNew := d.GetChange(ATTR_DATA)
+	log.Printf("[DEBUG] data old:\n%+v\ndata new:\n%+v\n", dataOld, dataNew)
+
+	secretJsonBytes, err := generateSecret(d)
+
+	log.Printf("[DEBUG] d.Get(ATTR_DATA) %+v", d.Get(ATTR_DATA).(map[string]interface{}))
+
 	if err != nil {
-		diags = append(diags, diag.Diagnostic{
-			Severity:      diag.Error,
-			Summary:       "Failed to marshal secret data",
-			Detail:        "",
-			AttributePath: nil,
-		})
-
-		return diags
-	}
-	h := sha256.New()
-	h.Write(dataBytes)
-
-	//newDataSha := string(h.Sum(nil))
-
-	dataMapBytes := make(map[string][]byte)
-	{
-		for key, value := range data {
-			dataMapBytes[key] = []byte(value)
-		}
+		return diag.FromErr(err)
 	}
 
 	// special treatment of the data value
 	// we set it to empty so it doesn't persist to state
-	d.Set("data", "")
+	//if err := d.Set(ATTR_DATA, map[string]interface{}{}); err != nil {
+	//	return diag.FromErr(err)
+	//}
 
-	var secret corev1.Secret
+	h := sha256.New()
+	h.Write(secretJsonBytes)
+	newSecretSha := hex.EncodeToString(h.Sum(nil))
 
-	{
-		secret = corev1.Secret{
-			TypeMeta:   v1.TypeMeta{
-				Kind:       "Secret",
-				APIVersion: corev1.SchemeGroupVersion.String(),
-			},
-			ObjectMeta: v1.ObjectMeta{
-				Name: d.Get("name").(string),
-			},
-			Data:       dataMapBytes,
-			Type:       corev1.SecretType(d.Get("type").(string)),
-		}
+	log.Printf("[DEBUG] new sha: %s", newSecretSha)
 
-		labelsInterfaceMap := d.Get("labels").(map[string]interface{})
-		labels := make(map[string]string)
-		for key, value := range labelsInterfaceMap {
-			labels[key] = value.(string)
-		}
-		secret.Labels = labels
-
-		annotationsInterfaceMap := d.Get("annotations").(map[string]interface{})
-		annotations := make(map[string]string)
-		for key, value := range annotationsInterfaceMap {
-			annotations[key] = value.(string)
-		}
-		secret.Annotations = annotations
+	d.SetId(newSecretSha)
+	if err := d.Set(ATTR_SHA256, newSecretSha); err != nil {
+		return diag.FromErr(err)
 	}
 
-	secretJsonBytes, err := json.Marshal(secret)
-	if err != nil {
-		diags = append(diags, diag.Diagnostic{
-			Severity:      diag.Error,
-			Summary:       "Failed to marshal secret",
-			Detail:        "",
-			AttributePath: nil,
-		})
+	//if d.HasChange(ATTR_SHA256) {
+	//	d.SetId("")
+	//}
 
-		return diags
+	//oldManifest, newManifest := d.GetChange(ATTR_MANIFEST)
+	//if d.HasChange(ATTR_SHA256) {
+	//	if err := d.Set(ATTR_MANIFEST, newManifest); err != nil {
+	//		return diag.FromErr(err)
+	//	}
+	//} else {
+	//	if err := d.Set(ATTR_MANIFEST, oldManifest); err != nil {
+	//		return diag.FromErr(err)
+	//	}
+	//}
+
+	return diags
+}
+
+func resourceSealedSecretDelete(_ context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
+	log.Println("SEALEDSECRET DELETE CALLED")
+	var diags diag.Diagnostics
+
+	//if err := d.Set(ATTR_DATA, map[string]interface{}{}); err != nil {
+	//	return diag.FromErr(err)
+	//}
+	//d.SetId("")
+
+	return diags
+}
+
+func interfaceMapToStringMap(input map[string]interface{}) map[string]string {
+	output := make(map[string]string)
+	for key, value := range input {
+		output[key] = value.(string)
 	}
 
+	return output
+}
+
+func sealIt(ctx context.Context, secretJsonBytes []byte, scope, namespace, kubeseal_bin, kubecontext string) (string, error) {
 	var sealedSecretBuf bytes.Buffer
 	var kubesealStdErr bytes.Buffer
 
-	exitCode, err := sh.Run(ctx, providerConfig.kubeseal, func(o *sh.RunOptions) {
+	exitCode, err := sh.Run(ctx, kubeseal_bin, func(o *sh.RunOptions) {
 		o.Stdin = strings.NewReader(string(secretJsonBytes))
 		o.Stdout = &sealedSecretBuf
 		o.Stderr = &kubesealStdErr
 
 		o.Args = []string{
-			"--scope", d.Get("scope").(string),
-			"--context", providerConfig.kubecontext,
+			"--scope", scope,
+			"--context", kubecontext,
 			"--format", "json",
 		}
 
-		if attr, ok := d.GetOk("namespace"); ok {
+		if namespace != "" {
 			o.Args = append(o.Args, "--namespace")
-			o.Args = append(o.Args, attr.(string))
+			o.Args = append(o.Args, namespace)
 		}
 	})
 
 	if err != nil {
-		diags = append(diags, diag.Diagnostic{
-			Severity:      diag.Error,
-			Summary:       "Failed to start kubeseal process",
-			Detail:        "",
-			AttributePath: nil,
-		})
-
-		return diags
+		return "", fmt.Errorf("Failed to start kubeseal process: %w", err)
 	}
 
 	if exitCode != 0 {
-		diags = append(diags, diag.Diagnostic{
-			Severity:      diag.Error,
-			Summary:       "Kubeseal failed",
-			Detail:        kubesealStdErr.String(),
-			AttributePath: nil,
-		})
-
-		return diags
+		return "", errors.New(fmt.Sprintf("Kubeseal failed: %s", kubesealStdErr.String()))
 	}
 
-	if err := d.Set("manifest", sealedSecretBuf.String()); err != nil {
-		return diag.FromErr(err)
-	}
-
-	//if newDataSha != oldDataSha256 {
-	//	d.SetId("")
-	//	return diags
-	//}
-
-	d.SetId(strconv.FormatInt(time.Now().Unix(), 10))
-
-	return diags
+	return sealedSecretBuf.String(), nil
 }
 
-func SHA256(src string) string {
-	h := sha256.New()
-	h.Write([]byte(src))
-	return fmt.Sprintf("%x", h.Sum(nil))
+func generateSecret(d *schema.ResourceData) ([]byte, error) {
+	dataInterfaceMap := d.Get(ATTR_DATA).(map[string]interface{})
+	data := make(map[string][]byte, len(dataInterfaceMap))
+	for key, val := range dataInterfaceMap {
+		valString := val.(string)
+		valBytes := make([]byte, base64.StdEncoding.EncodedLen(len(valString)))
+		log.Printf("[DEBUG] data value: %s", valString)
+		base64.StdEncoding.Encode(valBytes, []byte(valString))
+		data[key] = valBytes
+	}
+
+	labels := interfaceMapToStringMap(d.Get(ATTR_LABELS).(map[string]interface{}))
+	annotations := interfaceMapToStringMap(d.Get(ATTR_ANNOTATIONS).(map[string]interface{}))
+
+	secret := corev1.Secret{
+		TypeMeta:   v1.TypeMeta{
+			Kind:       "Secret",
+			APIVersion: corev1.SchemeGroupVersion.String(),
+		},
+		ObjectMeta: v1.ObjectMeta{
+			Name: d.Get(ATTR_NAME).(string),
+			Labels: labels,
+			Annotations: annotations,
+		},
+		Data:       data,
+		Type:       corev1.SecretType(d.Get(ATTR_TYPE).(string)),
+	}
+
+	secretJsonBytes, err := json.Marshal(secret)
+	if err != nil {
+		return []byte{}, fmt.Errorf("failed to marshal secret to json: %w", err)
+	}
+
+	return secretJsonBytes, nil
 }
