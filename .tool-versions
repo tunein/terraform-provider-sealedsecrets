@@ -1,0 +1,6 @@
+golang 1.15.8
+terraform 0.13.5
+go-jsonnet 0.16.0
+tanka 0.13.0
+jb 0.4.0
+kubeseal 0.13.1
